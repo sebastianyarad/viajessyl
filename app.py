@@ -29,27 +29,21 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# CSS global
 st.markdown("""
 <style>
   [data-testid="stAppViewContainer"] { background: #F7F9FC; }
   [data-testid="stHeader"] { background: transparent; }
   .kpi-card {
-      background: white;
-      border-radius: 12px;
-      padding: 20px 24px;
-      box-shadow: 0 1px 6px rgba(0,0,0,0.07);
-      text-align: center;
+      background: white; border-radius: 12px; padding: 20px 24px;
+      box-shadow: 0 1px 6px rgba(0,0,0,0.07); text-align: center;
   }
   .kpi-val  { font-size: 2.2rem; font-weight: 700; color: #1B4F72; line-height: 1.1; }
   .kpi-lbl  { font-size: 0.78rem; color: #888; margin-top: 4px; text-transform: uppercase; letter-spacing: .05em; }
   .kpi-sub  { font-size: 0.82rem; color: #555; margin-top: 6px; }
   .section-title {
       font-size: 1rem; font-weight: 700; color: #1A1A2E;
-      border-left: 4px solid #1B4F72; padding-left: 10px;
-      margin: 24px 0 12px;
+      border-left: 4px solid #1B4F72; padding-left: 10px; margin: 24px 0 12px;
   }
-  div[data-testid="stDataFrame"] { border-radius: 8px; overflow: hidden; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -57,10 +51,8 @@ st.markdown("""
 # 1. AUTENTICACIÓN
 # ─────────────────────────────────────────────────────────────────────────────
 def check_password():
-    """Pantalla de login con contraseña simple."""
     if st.session_state.get("authenticated"):
         return True
-
     st.markdown("""
     <div style='max-width:380px;margin:80px auto 0;background:white;
          border-radius:16px;padding:40px;box-shadow:0 4px 24px rgba(0,0,0,0.1)'>
@@ -70,11 +62,9 @@ def check_password():
       <div style='font-size:0.85rem;color:#888'>Dashboard de Viajes</div>
     </div>
     """, unsafe_allow_html=True)
-
     pwd = st.text_input("Contraseña", type="password", placeholder="Ingresá la clave de acceso")
     btn = st.button("Ingresar", use_container_width=True)
     st.markdown("</div>", unsafe_allow_html=True)
-
     if btn:
         if pwd == st.secrets["ACCESS_PASSWORD"]:
             st.session_state["authenticated"] = True
@@ -91,23 +81,35 @@ if not check_password():
 # ─────────────────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=300, show_spinner="Cargando datos desde Google Sheets…")
 def load_excel_from_drive() -> bytes:
-    """Exporta el Google Sheet como xlsx usando la Drive API (export, no get_media)."""
-    creds_info = dict(st.secrets["gcp_service_account"])
+    import json
+    # Leer el JSON completo como string — evita problemas de TOML con private_key
+    creds_info = json.loads(st.secrets["GCP_SERVICE_ACCOUNT_JSON"])
     creds = service_account.Credentials.from_service_account_info(
         creds_info,
         scopes=["https://www.googleapis.com/auth/drive.readonly"],
     )
     service = build("drive", "v3", credentials=creds, cache_discovery=False)
     file_id = st.secrets["GDRIVE_FILE_ID"]
-    # Google Sheets se exporta como xlsx (no se puede hacer get_media directamente)
-    response = service.files().export(
-        fileId=file_id,
-        mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    ).execute()
-    return response  # retorna bytes directamente
+    # Intentar export (Google Sheet nativo) y si falla, usar get_media (xlsx subido)
+    try:
+        return service.files().export(
+            fileId=file_id,
+            mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ).execute()
+    except Exception:
+        import io
+        from googleapiclient.http import MediaIoBaseDownload
+        request = service.files().get_media(fileId=file_id)
+        buf = io.BytesIO()
+        downloader = MediaIoBaseDownload(buf, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        buf.seek(0)
+        return buf.read()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. PARSEO DE DATOS (misma lógica que el xlsm)
+# 3. PARSEO DE DATOS
 # ─────────────────────────────────────────────────────────────────────────────
 REGION_MAP = [
     ("Piura",        "1B4F72", ["PIU"]),
@@ -126,18 +128,13 @@ def get_region(nombre):
     return "Otros", "#808080"
 
 def to_date(v):
-    if isinstance(v, datetime.datetime):
-        return v.date()
-    if isinstance(v, datetime.date):
-        return v
+    if isinstance(v, datetime.datetime): return v.date()
+    if isinstance(v, datetime.date):     return v
     return None
 
 @st.cache_data(ttl=300, show_spinner=False)
 def parse_trips(raw_bytes: bytes) -> pd.DataFrame:
     wb = pd.read_excel(io.BytesIO(raw_bytes), sheet_name="DATA", header=0)
-
-    # Columnas por índice (mismo layout del xlsx)
-    # Col 0=N°VIAJE, 2=NOMBRE, 7=FECHA SALIDA, 10=FECHA LLEGADA, 12=ESTADO, 15=CIUDAD, 16=PAIS
     col_n      = wb.columns[0]
     col_nombre = wb.columns[2]
     col_sal    = wb.columns[7]
@@ -149,48 +146,29 @@ def parse_trips(raw_bytes: bytes) -> pd.DataFrame:
     trips_raw = {}
     for _, row in wb.iterrows():
         n = row[col_n]
-        if pd.isna(n):
-            continue
+        if pd.isna(n): continue
         n = int(n)
         if n not in trips_raw:
-            trips_raw[n] = {
-                "nombre": str(row[col_nombre] or ""),
-                "estado": str(row[col_est] or ""),
-                "tramos": [],
-            }
+            trips_raw[n] = {"nombre": str(row[col_nombre] or ""), "estado": str(row[col_est] or ""), "tramos": []}
         fs = to_date(row[col_sal])
         if fs:
             fl = to_date(row[col_reg]) or fs
-            trips_raw[n]["tramos"].append({
-                "fs": fs, "fl": fl,
-                "ciudad": str(row[col_ciu] or ""),
-                "pais":   str(row[col_pai] or ""),
-            })
+            trips_raw[n]["tramos"].append({"fs": fs, "fl": fl, "ciudad": str(row[col_ciu] or ""), "pais": str(row[col_pai] or "")})
 
     rows = []
     for n, data in sorted(trips_raw.items()):
         tr = data["tramos"]
-        if not tr:
-            continue
+        if not tr: continue
         inicio = min(t["fs"] for t in tr)
         fin    = max(t["fl"] for t in tr)
         region, color = get_region(data["nombre"])
-        dest = tr[0]["ciudad"] if tr else ""
-        pais = tr[0]["pais"]   if tr else ""
         rows.append({
-            "n":       n,
-            "nombre":  data["nombre"],
-            "estado":  data["estado"],
-            "inicio":  inicio,
-            "fin":     fin,
-            "dias":    (fin - inicio).days + 1,
-            "ciudad":  dest,
-            "pais":    pais,
-            "destino": f"{dest}, {pais}" if pais else dest,
-            "region":  region,
-            "color":   color,
-            "sem_ini": inicio.isocalendar()[1],
-            "sem_fin": fin.isocalendar()[1],
+            "n": n, "nombre": data["nombre"], "estado": data["estado"],
+            "inicio": inicio, "fin": fin, "dias": (fin - inicio).days + 1,
+            "ciudad": tr[0]["ciudad"], "pais": tr[0]["pais"],
+            "destino": f"{tr[0]['ciudad']}, {tr[0]['pais']}" if tr[0]["pais"] else tr[0]["ciudad"],
+            "region": region, "color": color,
+            "sem_ini": inicio.isocalendar()[1], "sem_fin": fin.isocalendar()[1],
         })
     return pd.DataFrame(rows)
 
@@ -208,23 +186,21 @@ if df.empty:
     st.warning("No se encontraron viajes en el archivo.")
     st.stop()
 
-today      = datetime.date.today()
-year       = df["inicio"].dt.year.value_counts().idxmax() if not df.empty else today.year
+today = datetime.date.today()
+year  = df["inicio"].apply(lambda x: x.year).value_counts().idxmax()
 df["inicio"] = pd.to_datetime(df["inicio"])
 df["fin"]    = pd.to_datetime(df["fin"])
 
-# Botón de recarga
 col_h1, col_h2 = st.columns([8, 1])
 with col_h1:
     st.markdown(
         f"<h2 style='color:#1A1A2E;margin:0;padding:16px 0 4px'>✈ Dashboard de Viajes · {year}</h2>"
         f"<div style='color:#888;font-size:.85rem;padding-bottom:12px'>"
-        f"Pura Fruit Company &nbsp;·&nbsp; Actualizado: {datetime.datetime.now().strftime('%d/%m/%Y %H:%M')}"
-        f"</div>",
+        f"Pura Fruit Company &nbsp;·&nbsp; Actualizado: {datetime.datetime.now().strftime('%d/%m/%Y %H:%M')}</div>",
         unsafe_allow_html=True,
     )
 with col_h2:
-    if st.button("↻ Recargar", help="Fuerza descarga fresca desde Google Drive"):
+    if st.button("↻ Recargar", help="Fuerza descarga fresca desde Google Sheets"):
         st.cache_data.clear()
         st.rerun()
 
@@ -235,16 +211,15 @@ st.divider()
 # ─────────────────────────────────────────────────────────────────────────────
 st.markdown("<div class='section-title'>Resumen</div>", unsafe_allow_html=True)
 
-total_trips   = len(df)
-total_days    = df["dias"].sum()
-regions       = df["region"].nunique()
-fin_count     = (df["estado"].str.upper() == "FINALIZADO").sum()
-upcoming      = df[df["inicio"].dt.date >= today].sort_values("inicio")
-next_trip_str = ""
+total_trips = len(df)
+total_days  = df["dias"].sum()
+fin_count   = (df["estado"].str.upper() == "FINALIZADO").sum()
+upcoming    = df[df["inicio"].dt.date >= today].sort_values("inicio")
+next_str    = ""
 if not upcoming.empty:
     nx = upcoming.iloc[0]
     diff = (nx["inicio"].date() - today).days
-    next_trip_str = f"{nx['nombre'][:22]} · en {diff}d"
+    next_str = f"{nx['nombre'][:22]} · en {diff}d"
 
 k1, k2, k3, k4, k5 = st.columns(5)
 for col, val, lbl, sub in [
@@ -252,23 +227,19 @@ for col, val, lbl, sub in [
     (k2, f"{total_days}d",       "Días fuera",        f"~{total_days/365*100:.0f}% del año"),
     (k3, df["region"].nunique(), "Regiones",          ", ".join(df["region"].unique()[:3])),
     (k4, df["pais"].nunique(),   "Países",            ", ".join(df["pais"].dropna().unique()[:3])),
-    (k5, upcoming.shape[0],      "Próximos viajes",   next_trip_str or "—"),
+    (k5, upcoming.shape[0],      "Próximos viajes",   next_str or "—"),
 ]:
     col.markdown(
-        f"<div class='kpi-card'>"
-        f"<div class='kpi-val'>{val}</div>"
-        f"<div class='kpi-lbl'>{lbl}</div>"
-        f"<div class='kpi-sub'>{sub}</div>"
-        f"</div>",
+        f"<div class='kpi-card'><div class='kpi-val'>{val}</div>"
+        f"<div class='kpi-lbl'>{lbl}</div><div class='kpi-sub'>{sub}</div></div>",
         unsafe_allow_html=True,
     )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6. CALENDARIO ANUAL (heatmap diario)
+# 6. CALENDARIO ANUAL
 # ─────────────────────────────────────────────────────────────────────────────
 st.markdown("<div class='section-title'>Calendario anual</div>", unsafe_allow_html=True)
 
-# Construir mapa día → viaje
 travel_days = {}
 for _, trip in df.iterrows():
     d = trip["inicio"].date()
@@ -276,19 +247,15 @@ for _, trip in df.iterrows():
         travel_days[d] = trip
         d += datetime.timedelta(days=1)
 
-jan1   = datetime.date(year, 1, 1)
-dec31  = datetime.date(year, 12, 31)
+jan1  = datetime.date(year, 1, 1)
+dec31 = datetime.date(year, 12, 31)
 all_days = [jan1 + datetime.timedelta(days=i) for i in range((dec31 - jan1).days + 1)]
 
-# Organizar en semanas × días (GitHub-style)
-# Eje X = semana del año, eje Y = día de semana (0=lun … 6=dom)
 week_nums, day_nums, colors, texts = [], [], [], []
 for d in all_days:
     iso = d.isocalendar()
-    w = iso[1]
-    wd = d.weekday()
-    week_nums.append(w)
-    day_nums.append(wd)
+    week_nums.append(iso[1])
+    day_nums.append(d.weekday())
     if d in travel_days:
         t = travel_days[d]
         colors.append(t["color"])
@@ -303,110 +270,71 @@ for d in all_days:
         colors.append("#F4F6F7")
         texts.append(d.strftime('%d %b'))
 
-# Construir figura scatter
-DAYS_LABEL = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
+DAYS_LABEL = ["Lun","Mar","Mié","Jue","Vie","Sáb","Dom"]
 fig_cal = go.Figure()
 fig_cal.add_trace(go.Scatter(
-    x=week_nums, y=day_nums,
-    mode="markers",
-    marker=dict(
-        symbol="square",
-        size=18,
-        color=colors,
-        line=dict(width=1, color="white"),
-    ),
-    text=texts,
-    hoverinfo="text",
+    x=week_nums, y=day_nums, mode="markers",
+    marker=dict(symbol="square", size=18, color=colors, line=dict(width=1, color="white")),
+    text=texts, hoverinfo="text",
 ))
-# Etiquetas de mes
+MONTHS_ES = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"]
 month_week = {}
 for d in all_days:
-    if d.day == 1 or (d - datetime.timedelta(days=1)).month != d.month:
-        w = d.isocalendar()[1]
-        month_week[d.month] = w
-MONTHS_ES = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"]
+    if d.day == 1:
+        month_week[d.month] = d.isocalendar()[1]
 for m, w in month_week.items():
-    fig_cal.add_annotation(x=w, y=-1, text=MONTHS_ES[m-1],
-                           showarrow=False, font=dict(size=10, color="#888"), yref="y")
-
+    fig_cal.add_annotation(x=w, y=-1, text=MONTHS_ES[m-1], showarrow=False,
+                           font=dict(size=10, color="#888"), yref="y")
 fig_cal.update_layout(
-    height=200,
-    margin=dict(l=40, r=20, t=10, b=30),
-    paper_bgcolor="white",
-    plot_bgcolor="white",
+    height=200, margin=dict(l=40, r=20, t=10, b=30),
+    paper_bgcolor="white", plot_bgcolor="white",
     xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[0, 54]),
-    yaxis=dict(showgrid=False, zeroline=False,
-               ticktext=DAYS_LABEL, tickvals=list(range(7)),
+    yaxis=dict(showgrid=False, zeroline=False, ticktext=DAYS_LABEL, tickvals=list(range(7)),
                autorange="reversed", tickfont=dict(size=9, color="#aaa")),
     showlegend=False,
 )
 st.plotly_chart(fig_cal, use_container_width=True)
 
-# Leyenda de regiones
 leg_cols = st.columns(len(REGION_MAP) + 1)
 for i, (label, col, _) in enumerate(REGION_MAP):
     leg_cols[i].markdown(
         f"<div style='display:flex;align-items:center;gap:6px;font-size:.8rem;color:#555'>"
         f"<span style='width:12px;height:12px;border-radius:3px;background:#{col};display:inline-block'></span>"
-        f"{label}</div>",
-        unsafe_allow_html=True,
-    )
+        f"{label}</div>", unsafe_allow_html=True)
 leg_cols[-1].markdown(
     "<div style='display:flex;align-items:center;gap:6px;font-size:.8rem;color:#555'>"
     "<span style='width:12px;height:12px;border-radius:3px;background:#E74C3C;display:inline-block'></span>"
-    "Hoy</div>",
-    unsafe_allow_html=True,
-)
+    "Hoy</div>", unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 7. SWIM-LANES (Gantt por región)
+# 7. SWIM-LANES
 # ─────────────────────────────────────────────────────────────────────────────
 st.markdown("<div class='section-title'>Swim-lanes por región</div>", unsafe_allow_html=True)
 
 gantt_rows = []
 for _, trip in df.iterrows():
     gantt_rows.append(dict(
-        Task      = trip["region"],
-        Start     = trip["inicio"].strftime("%Y-%m-%d"),
-        Finish    = trip["fin"].strftime("%Y-%m-%d"),
-        Resource  = trip["region"],
-        Label     = f"{trip['nombre']} · {trip['destino']}",
-        Dias      = trip["dias"],
+        Task=trip["region"], Start=trip["inicio"].strftime("%Y-%m-%d"),
+        Finish=trip["fin"].strftime("%Y-%m-%d"), Resource=trip["region"],
+        Label=f"{trip['nombre']} · {trip['destino']}", Dias=trip["dias"],
     ))
-
 df_gantt = pd.DataFrame(gantt_rows)
 region_order = [r[0] for r in REGION_MAP if r[0] in df_gantt["Task"].values]
 
 fig_gantt = px.timeline(
-    df_gantt,
-    x_start="Start", x_end="Finish",
-    y="Task",
-    color="Resource",
-    color_discrete_map=REGION_COLORS,
-    hover_name="Label",
-    hover_data={"Dias": True, "Start": True, "Finish": True,
-                "Task": False, "Resource": False},
-    labels={"Task": "", "Resource": "Región"},
+    df_gantt, x_start="Start", x_end="Finish", y="Task", color="Resource",
+    color_discrete_map=REGION_COLORS, hover_name="Label",
+    hover_data={"Dias": True, "Start": True, "Finish": True, "Task": False, "Resource": False},
     category_orders={"Task": region_order},
 )
-fig_gantt.add_vline(
-    x=today.strftime("%Y-%m-%d"),
-    line_dash="dot", line_color="#E74C3C", line_width=2,
-    annotation_text="Hoy", annotation_font_color="#E74C3C",
-)
+fig_gantt.add_vline(x=today.strftime("%Y-%m-%d"), line_dash="dot", line_color="#E74C3C",
+                    line_width=2, annotation_text="Hoy", annotation_font_color="#E74C3C")
 fig_gantt.update_layout(
-    height=260,
-    margin=dict(l=120, r=20, t=10, b=30),
-    paper_bgcolor="white",
-    plot_bgcolor="white",
-    showlegend=False,
-    xaxis=dict(
-        showgrid=True, gridcolor="#F0F0F0",
-        tickformat="%b %Y", tickfont=dict(size=10),
-        range=[f"{year}-01-01", f"{year}-12-31"],
-    ),
-    yaxis=dict(tickfont=dict(size=10)),
-    bargap=0.35,
+    height=260, margin=dict(l=120, r=20, t=10, b=30),
+    paper_bgcolor="white", plot_bgcolor="white", showlegend=False,
+    xaxis=dict(showgrid=True, gridcolor="#F0F0F0", tickformat="%b %Y",
+               tickfont=dict(size=10), range=[f"{year}-01-01", f"{year}-12-31"]),
+    yaxis=dict(tickfont=dict(size=10)), bargap=0.35,
 )
 st.plotly_chart(fig_gantt, use_container_width=True)
 
@@ -415,55 +343,27 @@ st.plotly_chart(fig_gantt, use_container_width=True)
 # ─────────────────────────────────────────────────────────────────────────────
 st.markdown("<div class='section-title'>Agenda detallada</div>", unsafe_allow_html=True)
 
-# Filtros
 fc1, fc2, fc3 = st.columns([2, 2, 3])
 with fc1:
-    regiones_sel = st.multiselect(
-        "Región", df["region"].unique().tolist(),
-        default=df["region"].unique().tolist(),
-    )
+    regiones_sel = st.multiselect("Región", df["region"].unique().tolist(), default=df["region"].unique().tolist())
 with fc2:
-    estados_sel = st.multiselect(
-        "Estado", df["estado"].dropna().unique().tolist(),
-        default=df["estado"].dropna().unique().tolist(),
-    )
+    estados_sel = st.multiselect("Estado", df["estado"].dropna().unique().tolist(), default=df["estado"].dropna().unique().tolist())
 with fc3:
     search = st.text_input("Buscar viaje", placeholder="nombre, destino…")
 
-df_filt = df[
-    df["region"].isin(regiones_sel) &
-    df["estado"].isin(estados_sel)
-]
+df_filt = df[df["region"].isin(regiones_sel) & df["estado"].isin(estados_sel)]
 if search:
-    mask = (
-        df_filt["nombre"].str.contains(search, case=False, na=False) |
-        df_filt["destino"].str.contains(search, case=False, na=False)
-    )
+    mask = (df_filt["nombre"].str.contains(search, case=False, na=False) |
+            df_filt["destino"].str.contains(search, case=False, na=False))
     df_filt = df_filt[mask]
 
-# Tabla de display
-df_show = df_filt[[
-    "n", "estado", "nombre", "destino",
-    "inicio", "fin", "dias", "sem_ini", "sem_fin", "region",
-]].copy()
-df_show.columns = ["N°", "Estado", "Viaje", "Destino", "Salida", "Regreso",
-                   "Días", "Sem sal.", "Sem reg.", "Región"]
+df_show = df_filt[["n","estado","nombre","destino","inicio","fin","dias","sem_ini","sem_fin","region"]].copy()
+df_show.columns = ["N°","Estado","Viaje","Destino","Salida","Regreso","Días","Sem sal.","Sem reg.","Región"]
 df_show["Salida"]  = df_show["Salida"].dt.strftime("%d-%b")
 df_show["Regreso"] = df_show["Regreso"].dt.strftime("%d-%b")
 
-ESTADO_COLORS_CSS = {
-    "FINALIZADO": "background:#D5F5E3;color:#1E8449",
-    "CONFIRMADO":  "background:#D6EAF8;color:#1A5276",
-    "PENDIENTE":   "background:#FDEBD0;color:#935116",
-    "EN CURSO":    "background:#FDEDEC;color:#943126",
-    "PROGRAMADO":  "background:#EAF2FF;color:#1F618D",
-    "SOLICITADO":  "background:#F9F9F9;color:#666",
-}
-
 st.dataframe(
-    df_show,
-    use_container_width=True,
-    hide_index=True,
+    df_show, use_container_width=True, hide_index=True,
     height=min(40 + len(df_show) * 36, 500),
     column_config={
         "N°":      st.column_config.NumberColumn(width="small"),
@@ -478,20 +378,11 @@ st.dataframe(
         "Región":  st.column_config.TextColumn(width="medium"),
     }
 )
+st.caption(f"**{len(df_filt)} viajes** · **{df_filt['dias'].sum()} días** | Mostrando {len(df_show)} de {total_trips} viajes")
 
-# Totales
-st.caption(
-    f"**{len(df_filt)} viajes** · **{df_filt['dias'].sum()} días** | "
-    f"Mostrando {len(df_show)} de {total_trips} viajes"
-)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FOOTER
-# ─────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
 st.markdown(
     "<div style='text-align:center;color:#ccc;font-size:.75rem'>"
-    "Pura Fruit Company · Dashboard generado por Claude · Datos desde Google Drive"
-    "</div>",
+    "Pura Fruit Company · Dashboard generado por Claude · Datos desde Google Sheets</div>",
     unsafe_allow_html=True,
 )
